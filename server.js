@@ -22,7 +22,7 @@ app.get("/orders", async (req, res) => {
   try {
 
     const response = await fetch(
-      `https://${SHOP}/admin/api/2025-01/orders.json?limit=20`,
+      `https://${SHOP}/admin/api/2025-01/orders.json?limit=5`,
       {
         headers: {
           "X-Shopify-Access-Token": TOKEN,
