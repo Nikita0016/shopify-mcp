@@ -121,6 +121,38 @@ app.get("/product-sales", async (req, res) => {
   }
 });
 
+
+const connectionStatus = {};
+async function verifyConnection(site) {
+  const config = storeConfig(site);
+  if (!config?.shop || !config?.token || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(config.shop)) {
+    return connectionStatus[site] = { site, ok: false, status: "not_configured" };
+  }
+  try {
+    const response = await fetch(`https://${config.shop}/admin/api/2026-04/graphql.json`, {
+      method: "POST", signal: AbortSignal.timeout(15000),
+      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": config.token },
+      body: JSON.stringify({ query: "{ shop { myshopifyDomain currencyCode ianaTimezone } currentAppInstallation { accessScopes { handle } } orders(first: 1) { nodes { id } } }" })
+    });
+    const data = await response.json();
+    if (!response.ok || data.errors?.length || !data.data?.shop || !data.data?.orders) {
+      return connectionStatus[site] = { site, ok: false, status: "verification_failed", http_status: response.status, error_codes: (data.errors || []).map(e => e.extensions?.code || "GRAPHQL_ERROR") };
+    }
+    return connectionStatus[site] = { site, ok: true, status: "verified", shop: data.data.shop.myshopifyDomain, currency: data.data.shop.currencyCode, timezone: data.data.shop.ianaTimezone, scopes: data.data.currentAppInstallation?.accessScopes?.map(s => s.handle) || [], checked_at: new Date().toISOString() };
+  } catch {
+    return connectionStatus[site] = { site, ok: false, status: "network_or_response_error" };
+  }
+}
+app.get("/connection-status", (req, res) => {
+  if (!checkApiKey(req, res)) return;
+  res.set("Cache-Control", "no-store");
+  res.json({ stores: connectionStatus });
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log("Server running");
+  Promise.all(["global", "japan"].map(async site => {
+    const result = await verifyConnection(site);
+    console.log("SHOPIFY_CONNECTION_CHECK", JSON.stringify(result));
+  }));
 });
