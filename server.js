@@ -149,8 +149,47 @@ app.get("/connection-status", (req, res) => {
   res.json({ stores: connectionStatus });
 });
 
+
+const dailyReports = new Map();
+async function dailySales(site, days) {
+  const config = storeConfig(site);
+  if (!config?.shop || !config?.token || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(config.shop)) throw new Error("STORE_NOT_CONFIGURED");
+  const cacheKey = site + ":" + days;
+  const cached = dailyReports.get(cacheKey);
+  if (cached && Date.now() - cached.saved < 300000) return cached.report;
+  const statement = "FROM sales SHOW net_sales, orders TIMESERIES day SINCE -" + days + "d UNTIL yesterday ORDER BY day ASC";
+  const response = await fetch("https://" + config.shop + "/admin/api/2026-01/graphql.json", {
+    method: "POST", signal: AbortSignal.timeout(45000),
+    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": config.token },
+    body: JSON.stringify({ query: "query Report($query: String!) { shop { currencyCode ianaTimezone } shopifyqlQuery(query: $query) { tableData { columns { name dataType displayName } rows } parseErrors } }", variables: { query: statement } })
+  });
+  if (!response.ok) throw new Error("SHOPIFY_HTTP_" + response.status);
+  const result = await response.json();
+  const reportData = result.data?.shopifyqlQuery;
+  if (result.errors?.length || reportData?.parseErrors?.length || !reportData?.tableData || !result.data?.shop) throw new Error("SHOPIFYQL_REPORT_UNAVAILABLE");
+  const { columns, rows } = reportData.tableData;
+  if (!Array.isArray(rows) || !["day", "net_sales", "orders"].every(k => columns.some(c => c.name === k))) throw new Error("INVALID_REPORT_SCHEMA");
+  const report = { site, currency: result.data.shop.currencyCode, timezone: result.data.shop.ianaTimezone, fetched_at: new Date().toISOString(), definition: "Shopify Analytics net_sales; excludes today; Shopify reporting timezone; no currency conversion", query: statement, rows: rows.map(row => {
+    const get = name => Array.isArray(row) ? row[columns.findIndex(c => c.name === name)] : row[name];
+    const date = String(get("day")).slice(0, 10), revenue = Number(get("net_sales")), orders = Number(get("orders"));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || get("net_sales") == null || get("orders") == null || !Number.isFinite(revenue) || !Number.isFinite(orders)) throw new Error("INVALID_REPORT_ROW");
+    return { date, revenue, orders };
+  }) };
+  dailyReports.set(cacheKey, { saved: Date.now(), report });
+  return report;
+}
+app.get("/daily-sales", async (req, res) => {
+  if (!checkApiKey(req, res)) return;
+  res.set("Cache-Control", "no-store");
+  const site = req.query.site || "global", days = Number(req.query.days ?? 28);
+  if (!["global", "japan"].includes(site) || ![7, 28, 90].includes(days)) return res.status(400).json({ error: "Invalid site or days" });
+  try { res.json(await dailySales(site, days)); }
+  catch (err) { res.status(502).json({ error: err.message }); }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log("Server running");
+  dailySales("global", 28).then(r => console.log("SHOPIFY_DAILY_REPORT", JSON.stringify({ok:true, rows:r.rows.length,currency:r.currency,timezone:r.timezone}))).catch(e => console.log("SHOPIFY_DAILY_REPORT", JSON.stringify({ok:false,error:e.message})));
   Promise.all(["global", "japan"].map(async site => {
     const result = await verifyConnection(site);
     console.log("SHOPIFY_CONNECTION_CHECK", JSON.stringify(result));
